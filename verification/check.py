@@ -65,10 +65,14 @@ class Scenario:
             *(str(argument) for argument in arguments),
         ]
         try:
-            return subprocess.run(
+            completed = subprocess.run(
                 command, cwd=self.workspace, env=environment,
-                capture_output=True, text=True, encoding="utf-8",
+                capture_output=True,
                 timeout=COMMAND_TIMEOUT_SECONDS, check=False,
+            )
+            return subprocess.CompletedProcess(
+                completed.args, completed.returncode,
+                completed.stdout.decode("utf-8"), completed.stderr.decode("utf-8"),
             )
         except subprocess.TimeoutExpired as error:
             raise CheckFailure(f"command timed out after {COMMAND_TIMEOUT_SECONDS}s: {arguments}") from error

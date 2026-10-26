@@ -7,9 +7,12 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import subprocess
 import tempfile
 import tomllib
+
+from .catalog import case_settings
 
 
 def git(repo: Path, *args: str, env: dict | None = None) -> bytes:
@@ -68,13 +71,64 @@ def changed_paths(workspace: Path, base: str) -> list[str]:
     return sorted({p.decode("utf-8") for p in (changed + untracked).split(b"\0") if p})
 
 
-def allowed_solution_path(path: str) -> bool:
-    return path.startswith(("stockctl/", "tests_solution/")) or path == "docs/solution.md"
+def snapshot_case(workspace: Path, base: str) -> dict:
+    if not git(workspace, "ls-tree", "--name-only", base, "--", "CASE.json").strip():
+        return {"id": "workflow"}
+    metadata = json.loads(git(workspace, "show", f"{base}:CASE.json"))
+    case_settings(metadata.get("id"))
+    return metadata
+
+
+def prepare_case(repository: Path, base: str, destination: Path, case_id: str) -> dict:
+    """Build a case-specific copy without other product fixtures or solutions."""
+    settings = case_settings(case_id)
+    export_snapshot(repository, base, destination)
+    metadata = {"id": case_id, "source_commit": base}
+    if case_id != "workflow":
+        case_root = destination / "cases" / case_id
+        overlay = case_root / "workspace"
+        if not overlay.is_dir() or not (case_root / "TASK.md").is_file():
+            raise ValueError(f"The selected commit does not contain case {case_id}")
+        for name in ("stockctl", "tests_product"):
+            target = destination / name
+            if target.exists():
+                shutil.rmtree(target)
+        (destination / "docs/contracts.md").unlink(missing_ok=True)
+        shutil.copytree(overlay, destination, dirs_exist_ok=True)
+        shutil.copyfile(case_root / "TASK.md", destination / "TASK.md")
+        if settings["phases"] == 2:
+            followup = (case_root / "phase2.md").read_bytes()
+            metadata["followup_sha256"] = sha256(followup)
+            runtime = destination / ".benchmark"
+            runtime.mkdir(exist_ok=True)
+            (runtime / "next-phase.md").write_bytes(followup)
+    cases = destination / "cases"
+    if cases.exists():
+        shutil.rmtree(cases)
+    # Controller self-tests refer to the complete catalog, not one prepared case.
+    self_tests = destination / "tests_harness"
+    if self_tests.exists():
+        shutil.rmtree(self_tests)
+    (destination / "README.md").write_text(
+        f"# Рабочая копия: {case_id}\n\n{settings['title']}.\n\n"
+        "Следуйте AGENTS.md, выполните текущий этап TASK.md и верните сформированные отчёт и patch.\n"
+        "Здесь только исходники выбранного сценария. Другие сценарии и тесты контроллера исключены.\n\n"
+        "Полный стенд: https://github.com/Vitykovskiy/orchestration-testing\n",
+        encoding="utf-8",
+    )
+    (destination / "CASE.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return metadata
+
+
+def allowed_solution_path(path: str, case_id: str = "workflow") -> bool:
+    package = case_settings(case_id)["package"]
+    return path.startswith((package + "/", "tests_solution/")) or path == "docs/solution.md"
 
 
 def scope_violations(workspace: Path, base: str) -> list[str]:
-    violations = [p for p in changed_paths(workspace, base) if not allowed_solution_path(p)]
-    for dirname in ("stockctl", "tests_solution"):
+    case_id = snapshot_case(workspace, base)["id"]
+    violations = [p for p in changed_paths(workspace, base) if not allowed_solution_path(p, case_id)]
+    for dirname in (case_settings(case_id)["package"], "tests_solution"):
         directory = workspace / dirname
         if directory.is_symlink():
             violations.append(f"symlink:{dirname}")
@@ -91,7 +145,8 @@ def solution_patch(workspace: Path, base: str) -> bytes:
     with tempfile.TemporaryDirectory(prefix="benchmark-index-") as tmp:
         env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / "index"))
         git(workspace, "read-tree", base, env=env)
-        paths = ["stockctl", "tests_solution", "docs/solution.md"]
+        case_id = snapshot_case(workspace, base)["id"]
+        paths = [case_settings(case_id)["package"], "tests_solution", "docs/solution.md"]
         for path in paths:
             tracked = git(workspace, "ls-files", "--", path, env=env)
             if (workspace / path).exists() or tracked:

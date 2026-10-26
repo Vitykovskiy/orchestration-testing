@@ -1,0 +1,1 @@
+"""Small stock-status display."""

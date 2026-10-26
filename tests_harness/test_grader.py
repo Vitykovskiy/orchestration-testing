@@ -75,6 +75,10 @@ class VerifierBoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(CheckFailure, "not one JSON"):
             self.scenario.json("init")
 
+    def test_command_preserves_output_newlines_before_contract_checks(self):
+        self.write_program("import sys\nsys.stdout.buffer.write(b'[]\\r\\n')\n")
+        self.assertEqual(self.scenario.command("init").stdout, "[]\r\n")
+
     def test_wrong_reservation_shape_is_a_check_failure(self):
         self.write_program("print('[]')\n")
         with self.assertRaisesRegex(CheckFailure, "must be an object"):
